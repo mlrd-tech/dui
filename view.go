@@ -15,7 +15,8 @@ var (
 	secondaryColor = lipgloss.Color("252") // light gray
 	errorColor     = lipgloss.Color("196") // red
 	successColor   = lipgloss.Color("82")  // green
-	selectedColor  = lipgloss.Color("220") // yellow
+	selectedColor  = lipgloss.Color("12")  // light blue
+	filterColor    = lipgloss.Color("5")   // magenta
 	cursorColor    = lipgloss.Color("39")  // blue
 
 	headerStyle = lipgloss.NewStyle().
@@ -91,6 +92,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderErrorView(contentHeight))
 	case ModeConfirmDelete:
 		b.WriteString(m.renderItems(contentHeight))
+	case ModeFilter:
+		b.WriteString(m.renderItems(contentHeight))
 	default:
 		b.WriteString(m.renderItems(contentHeight))
 	}
@@ -116,7 +119,16 @@ func (m *Model) renderHeader() string {
 		tableName = "No table"
 	}
 
-	tableStr := headerStyle.Render(tableName)
+	// Add filter indicator if filters are active
+	filterIndicator := ""
+	if m.isFiltered {
+		filterIndicator = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(filterColor).
+			Render(fmt.Sprintf(" FILTERED: %d", len(m.filters)))
+	}
+
+	tableStr := headerStyle.Render(tableName) + filterIndicator
 
 	var statusStr string
 	if m.err != nil {
@@ -132,7 +144,11 @@ func (m *Model) renderHeader() string {
 }
 
 func (m *Model) renderItems(height int) string {
-	if len(m.items) == 0 {
+	displayItems := m.getFilteredItems()
+	if len(displayItems) == 0 {
+		if m.isFiltered {
+			return strings.Repeat("\n", height-2) + statusStyle.Render("  No items match filter")
+		}
 		return strings.Repeat("\n", height-2) + statusStyle.Render("  No items")
 	}
 
@@ -146,15 +162,11 @@ func (m *Model) renderItems(height int) string {
 	pkWidth := 20
 	skWidth := 20
 	jsonWidth := m.width - pkWidth - skWidth - 10
-
 	if table.SortKey == "" {
 		skWidth = 0
 		jsonWidth = m.width - pkWidth - 6
 	}
-
-	if jsonWidth < 20 {
-		jsonWidth = 20
-	}
+	jsonWidth = max(20, jsonWidth)
 
 	var lines []string
 
@@ -165,12 +177,12 @@ func (m *Model) renderItems(height int) string {
 		startIdx = m.cursor - visibleRows + 1
 	}
 	endIdx := startIdx + visibleRows
-	if endIdx > len(m.items) {
-		endIdx = len(m.items)
+	if endIdx > len(displayItems) {
+		endIdx = len(displayItems)
 	}
 
 	for i := startIdx; i < endIdx; i++ {
-		item := m.items[i]
+		item := displayItems[i]
 
 		pk := truncate(GetKeyValue(item, table.PartitionKey), pkWidth)
 		sk := ""
@@ -303,6 +315,7 @@ Keyboard Shortcuts:
   e           Edit current item in $EDITOR
   dd          Delete selected/current item(s)
   i, a        Insert new item (PutItem)
+  f           Filter items (CSV: attr=value, attr2=value2)
   t           Select table
   ?           Show this help
   Esc         Cancel/close
@@ -347,6 +360,12 @@ func (m *Model) renderInput() string {
 
 	case ModeCommand:
 		return modeCommandStyle.Render(m.input.View())
+
+	case ModeFilter:
+		return lipgloss.NewStyle().
+			Bold(true).
+			Foreground(filterColor).
+			Render("Filter: " + m.filterInput.View())
 
 	default:
 		// Normal mode: rows selected with arrows/jk, hotkeys (no input shown)

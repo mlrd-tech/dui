@@ -373,3 +373,28 @@ func BuildKey(tableInfo *TableInfo, pkValue string, skValue string) (map[string]
 
 	return key, nil
 }
+
+// AttributeValueToString converts an AttributeValue to a string representation
+func AttributeValueToString(av types.AttributeValue) string {
+	val := attrToInterface(av)
+	if val == nil {
+		return ""
+	}
+
+	// Convert the interface to string
+	switch v := val.(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	case bool:
+		return fmt.Sprintf("%t", v)
+	default:
+		// For complex types (lists, maps, etc), use JSON representation
+		jsonBytes, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(jsonBytes)
+	}
+}

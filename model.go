@@ -26,6 +26,7 @@ const (
 	ModeConfirmDelete
 	ModeHelp
 	ModeErrorView
+	ModeFilter
 )
 
 type Model struct {
@@ -53,6 +54,11 @@ type Model struct {
 	editOrigContent string
 	preserveStatus  bool
 	lastError       string
+
+	// Filter state
+	filterInput textinput.Model
+	filters     map[string]string
+	isFiltered  bool
 }
 
 // Messages
@@ -90,11 +96,18 @@ func NewModel(ddb *DDB, requestedTable string) *Model {
 	ti.Width = 50
 	ti.Focus()
 
+	fi := textinput.New()
+	fi.Placeholder = "attr1=value1, attr2=value2, ..."
+	fi.CharLimit = 512
+	fi.Width = 60
+
 	return &Model{
 		ddb:            ddb,
 		requestedTable: requestedTable,
 		selected:       make(map[int]bool),
 		input:          ti,
+		filterInput:    fi,
+		filters:        make(map[string]string),
 		status:         "Loading tables...",
 	}
 }
@@ -261,6 +274,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleItemViewMode(msg)
 	case ModeConfirmDelete:
 		return m.handleConfirmDeleteMode(msg)
+	case ModeFilter:
+		return m.handleFilterMode(msg)
 	case ModeErrorView:
 		if msg.Type == tea.KeyEsc || msg.Type == tea.KeyEnter || msg.String() == "q" {
 			m.mode = ModeNormal
@@ -315,7 +330,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		if m.cursor < len(m.items)-1 {
+		items := m.getFilteredItems()
+		if m.cursor < len(items)-1 {
 			m.cursor++
 		}
 		m.keyBuffer = ""
@@ -330,15 +346,17 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.executeCommand(cmd)
 		}
 		// Otherwise view the selected item
-		if len(m.items) > 0 && m.cursor < len(m.items) {
-			m.viewContent = ItemToPrettyJSON(m.items[m.cursor])
+		item := m.getCurrentItem()
+		if item != nil {
+			m.viewContent = ItemToPrettyJSON(item)
 			m.mode = ModeItemView
 		}
 		m.keyBuffer = ""
 		return m, nil
 
 	case " ":
-		if len(m.items) > 0 {
+		items := m.getFilteredItems()
+		if len(items) > 0 && m.cursor < len(items) {
 			if m.selected[m.cursor] {
 				delete(m.selected, m.cursor)
 			} else {
@@ -349,7 +367,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "e":
-		if len(m.items) > 0 && len(m.selected) <= 1 {
+		items := m.getFilteredItems()
+		if len(items) > 0 && len(m.selected) <= 1 {
 			return m, m.editCurrentItem()
 		}
 		m.keyBuffer = ""
@@ -379,6 +398,13 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.keyBuffer = ""
 		return m, nil
 
+	case "f":
+		m.mode = ModeFilter
+		m.filterInput.SetValue("")
+		m.filterInput.Focus()
+		m.keyBuffer = ""
+		return m, nil
+
 	case "esc":
 		m.keyBuffer = ""
 		m.input.SetValue("")
@@ -395,7 +421,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "G":
-		m.cursor = max(len(m.items)-1, 0)
+		items := m.getFilteredItems()
+		m.cursor = max(len(items)-1, 0)
 		m.keyBuffer = ""
 		return m, nil
 
@@ -477,6 +504,47 @@ func (m *Model) handleConfirmDeleteMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m *Model) handleFilterMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.mode = ModeNormal
+		m.filterInput.SetValue("")
+		m.filterInput.Blur()
+		return m, nil
+
+	case tea.KeyEnter:
+		filterStr := strings.TrimSpace(m.filterInput.Value())
+		m.mode = ModeNormal
+		m.filterInput.Blur()
+
+		if filterStr == "" {
+			// Clear filters
+			m.filters = make(map[string]string)
+			m.isFiltered = false
+			m.status = "Filters cleared"
+		} else {
+			// Parse and apply filters
+			filters, err := m.parseFilters(filterStr)
+			if err != nil {
+				m.status = fmt.Sprintf("Filter error: %v", err)
+				return m, nil
+			}
+			m.filters = filters
+			m.isFiltered = true
+			m.status = fmt.Sprintf("Filters applied: %d criteria", len(m.filters))
+		}
+
+		// Reset cursor and selection when filters change
+		m.cursor = 0
+		m.selected = make(map[int]bool)
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.filterInput, cmd = m.filterInput.Update(msg)
+	return m, cmd
 }
 
 func (m *Model) executeCommand(cmd string) tea.Cmd {
@@ -684,7 +752,8 @@ func (m *Model) executeDelete(args []string) tea.Cmd {
 }
 
 func (m *Model) deleteSelectedItems() tea.Cmd {
-	if len(m.tables) == 0 || len(m.items) == 0 {
+	items := m.getFilteredItems()
+	if len(m.tables) == 0 || len(items) == 0 {
 		return nil
 	}
 
@@ -696,7 +765,7 @@ func (m *Model) deleteSelectedItems() tea.Cmd {
 		for idx := range m.selected {
 			toDelete = append(toDelete, idx)
 		}
-	} else if m.cursor < len(m.items) {
+	} else if m.cursor < len(items) {
 		toDelete = append(toDelete, m.cursor)
 	}
 
@@ -709,10 +778,10 @@ func (m *Model) deleteSelectedItems() tea.Cmd {
 		deleted := 0
 
 		for _, idx := range toDelete {
-			if idx >= len(m.items) {
+			if idx >= len(items) {
 				continue
 			}
-			item := m.items[idx]
+			item := items[idx]
 
 			// Build key from item
 			key := make(map[string]types.AttributeValue)
@@ -750,11 +819,12 @@ func (m *Model) putNewItem() tea.Cmd {
 }
 
 func (m *Model) editCurrentItem() tea.Cmd {
-	if len(m.items) == 0 || m.cursor >= len(m.items) {
+	item := m.getCurrentItem()
+	if item == nil {
 		m.status = "No item selected"
 		return nil
 	}
-	content := ItemToPrettyJSON(m.items[m.cursor])
+	content := ItemToPrettyJSON(item)
 	return m.openEditor(content)
 }
 
@@ -822,4 +892,95 @@ func (m *Model) saveEditedItem(content string) tea.Cmd {
 
 		return operationDoneMsg{status: "Item saved"}
 	}
+}
+
+// parseFilters parses a CSV string of attribute=value pairs into a map
+func (m *Model) parseFilters(filterStr string) (map[string]string, error) {
+	filters := make(map[string]string)
+
+	parts := strings.Split(filterStr, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("invalid filter format: '%s' (expected attribute=value)", part)
+		}
+
+		key := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
+
+		if key == "" {
+			return nil, fmt.Errorf("empty attribute name in filter")
+		}
+
+		filters[key] = value
+	}
+
+	if len(filters) == 0 {
+		return nil, fmt.Errorf("no valid filters found")
+	}
+
+	return filters, nil
+}
+
+// matchesFilters checks if an item matches the current filter criteria
+func (m *Model) matchesFilters(item map[string]types.AttributeValue) bool {
+	if !m.isFiltered || len(m.filters) == 0 {
+		return true
+	}
+
+	for attr, filterValue := range m.filters {
+		attrValue, exists := item[attr]
+		if !exists {
+			return false
+		}
+
+		// Convert attribute value to string for comparison
+		var itemValue string
+		switch v := attrValue.(type) {
+		case *types.AttributeValueMemberS:
+			itemValue = v.Value
+		case *types.AttributeValueMemberN:
+			itemValue = v.Value
+		case *types.AttributeValueMemberBOOL:
+			itemValue = fmt.Sprintf("%t", v.Value)
+		default:
+			// For complex types, convert to JSON and compare
+			itemValue = AttributeValueToString(attrValue)
+		}
+
+		// Case-insensitive substring match
+		if !strings.Contains(strings.ToLower(itemValue), strings.ToLower(filterValue)) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// getFilteredItems returns the items that match the current filters
+func (m *Model) getFilteredItems() []map[string]types.AttributeValue {
+	if !m.isFiltered {
+		return m.items
+	}
+	filtered := make([]map[string]types.AttributeValue, 0)
+	for _, item := range m.items {
+		if m.matchesFilters(item) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// getCurrentItem returns the item at the cursor position, respecting filters
+func (m *Model) getCurrentItem() map[string]types.AttributeValue {
+	items := m.getFilteredItems()
+	if m.cursor < 0 || m.cursor >= len(items) {
+		return nil
+	}
+	return items[m.cursor]
 }
