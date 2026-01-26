@@ -59,6 +59,9 @@ type Model struct {
 	filterInput textinput.Model
 	filters     map[string]string
 	isFiltered  bool
+
+	// Data type view state
+	showDataTypes bool
 }
 
 // Messages
@@ -485,10 +488,14 @@ func (m *Model) handleItemViewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q", "enter":
 		m.mode = ModeNormal
 		m.viewContent = ""
+		m.showDataTypes = false
 	case "e":
 		m.mode = ModeNormal
 		m.viewContent = ""
+		m.showDataTypes = false
 		return m, m.editCurrentItem()
+	case "x":
+		m.showDataTypes = !m.showDataTypes
 	}
 	return m, nil
 }

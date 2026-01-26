@@ -252,24 +252,64 @@ func (m *Model) renderTableSelect(height int) string {
 
 func (m *Model) renderItemView(height int) string {
 	visibleRows := height - 1
-	// Add border
-	content := overlayStyle.Render(m.viewContent)
-	contentLines := strings.Split(content, "\n")
 
-	// Start at top
-	result := contentLines
+	if !m.showDataTypes {
+		// Normal view - just show values
+		content := overlayStyle.Render(m.viewContent)
+		contentLines := strings.Split(content, "\n")
 
-	// Pad to fill screen
-	for len(result) < visibleRows {
-		result = append(result, "")
+		// Start at top
+		result := contentLines
+
+		// Pad to fill screen
+		for len(result) < visibleRows {
+			result = append(result, "")
+		}
+
+		// Truncate to fit
+		if len(result) > visibleRows {
+			result = result[:visibleRows]
+		}
+
+		return strings.Join(result, "\n")
 	}
 
-	// Truncate to fit
-	if len(result) > visibleRows {
-		result = result[:visibleRows]
+	// Split-screen view: values on left, types on right
+	item := m.getCurrentItem()
+	if item == nil {
+		return strings.Repeat("\n", visibleRows-1) + statusStyle.Render("  No item")
 	}
 
-	return strings.Join(result, "\n")
+	// Get both value and type content
+	valueContent := ItemToPrettyJSON(item)
+	typeContent := ItemToDataTypes(item)
+
+	// Calculate split width (50/50)
+	halfWidth := (m.width - 6) / 2
+	if halfWidth < 10 {
+		halfWidth = 10
+	}
+
+	// Create bordered panels
+	leftStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(primaryColor).
+		Padding(1).
+		Width(halfWidth).
+		Height(visibleRows - 2)
+
+	rightStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(successColor).
+		Padding(1).
+		Width(halfWidth).
+		Height(visibleRows - 2)
+
+	leftPanel := leftStyle.Render(valueContent)
+	rightPanel := rightStyle.Render(typeContent)
+
+	// Join panels side by side
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
 }
 
 func (m *Model) renderErrorView(height int) string {
@@ -317,6 +357,7 @@ Keyboard Shortcuts:
   i, a        Insert new item (PutItem)
   f           Filter items (CSV: attr=value, attr2=value2)
   t           Select table
+  x           (In item view) Toggle data type display
   ?           Show this help
   Esc         Cancel/close
 
@@ -331,6 +372,19 @@ Commands:
   /?                               Show this help
   /err                             Show last error
   /q, :q, :quit                    Quit
+
+Type Hints:
+  When editing items, use <TYPE> suffix to specify DynamoDB types:
+  Examples:
+    "count<N>": 42              → Number type
+    "tags<SS>": ["a", "b"]      → String Set
+    "data<L>": [1, "two"]       → List
+    "config<M>": {...}          → Map
+    "active<BOOL>": true        → Boolean
+    "empty<NULL>": null         → Null
+
+  Supported types: S, N, BOOL, NULL, L, M, SS, NS, B, BS
+  Type hints are removed from attribute names after conversion.
 
 Press Esc or ? to close
 `
@@ -350,7 +404,10 @@ func (m *Model) renderInput() string {
 		return statusStyle.Render("Press Enter to select, Esc to cancel")
 
 	case ModeItemView:
-		return statusStyle.Render("Press Enter, q, or Esc to close")
+		if m.showDataTypes {
+			return statusStyle.Render("Press x to hide types, Enter/q/Esc to close")
+		}
+		return statusStyle.Render("Press x to show types, Enter/q/Esc to close")
 
 	case ModeErrorView:
 		return errorStyle.Render("Press Enter, q, or Esc to close")

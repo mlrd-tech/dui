@@ -245,7 +245,209 @@ func JSONToItem(jsonStr string) (map[string]types.AttributeValue, error) {
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
-	return interfaceToAttributeValue(data), nil
+	// Process type hints before conversion
+	processedData, err := processTypeHints(data)
+	if err != nil {
+		return nil, err
+	}
+	return interfaceToAttributeValue(processedData), nil
+}
+
+// processTypeHints processes attribute names with type hints (e.g., "name<S>", "age<N>")
+// and returns a new map with the type hints applied and removed from attribute names
+func processTypeHints(data map[string]any) (map[string]any, error) {
+	result := make(map[string]any)
+
+	for key, value := range data {
+		// Check if the key has a type hint suffix: <TYPE>
+		if idx := strings.LastIndex(key, "<"); idx != -1 && strings.HasSuffix(key, ">") {
+			// Extract the type hint
+			typeHint := strings.TrimSuffix(key[idx+1:], ">")
+			cleanKey := key[:idx]
+
+			// Convert the value based on the type hint
+			convertedValue, err := convertValueWithTypeHint(value, typeHint)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert %s with type %s: %w", cleanKey, typeHint, err)
+			}
+
+			result[cleanKey] = convertedValue
+		} else {
+			// No type hint, keep as-is
+			result[key] = value
+		}
+	}
+
+	return result, nil
+}
+
+// convertValueWithTypeHint converts a value to a specific format based on the DynamoDB type hint
+func convertValueWithTypeHint(value any, typeHint string) (any, error) {
+	switch strings.ToUpper(typeHint) {
+	case "S":
+		// String type
+		return fmt.Sprintf("%v", value), nil
+
+	case "N":
+		// Number type - keep as json.Number or numeric type
+		switch v := value.(type) {
+		case json.Number:
+			return v, nil
+		case float64, int, int64:
+			return v, nil
+		case string:
+			// Parse string as number
+			return json.Number(v), nil
+		default:
+			return json.Number(fmt.Sprintf("%v", v)), nil
+		}
+
+	case "BOOL":
+		// Boolean type
+		switch v := value.(type) {
+		case bool:
+			return v, nil
+		case string:
+			return strings.ToLower(v) == "true", nil
+		default:
+			return false, fmt.Errorf("cannot convert %v to boolean", v)
+		}
+
+	case "NULL":
+		// Null type
+		return nil, nil
+
+	case "L":
+		// List type
+		switch v := value.(type) {
+		case []any:
+			return v, nil
+		case string:
+			// Try to parse as JSON array
+			var list []any
+			if err := json.Unmarshal([]byte(v), &list); err != nil {
+				return nil, fmt.Errorf("cannot parse list: %w", err)
+			}
+			return list, nil
+		default:
+			return []any{v}, nil
+		}
+
+	case "M":
+		// Map type
+		switch v := value.(type) {
+		case map[string]any:
+			// Recursively process nested maps for type hints
+			return processTypeHints(v)
+		case string:
+			// Try to parse as JSON object
+			var m map[string]any
+			if err := json.Unmarshal([]byte(v), &m); err != nil {
+				return nil, fmt.Errorf("cannot parse map: %w", err)
+			}
+			return processTypeHints(m)
+		default:
+			return nil, fmt.Errorf("cannot convert %v to map", v)
+		}
+
+	case "SS":
+		// String Set
+		switch v := value.(type) {
+		case []any:
+			ss := make([]string, len(v))
+			for i, item := range v {
+				ss[i] = fmt.Sprintf("%v", item)
+			}
+			return map[string]any{"__SS": ss}, nil
+		case string:
+			// Try to parse as JSON array
+			var list []any
+			if err := json.Unmarshal([]byte(v), &list); err != nil {
+				// Treat as single-element set
+				return map[string]any{"__SS": []string{v}}, nil
+			}
+			ss := make([]string, len(list))
+			for i, item := range list {
+				ss[i] = fmt.Sprintf("%v", item)
+			}
+			return map[string]any{"__SS": ss}, nil
+		default:
+			return map[string]any{"__SS": []string{fmt.Sprintf("%v", v)}}, nil
+		}
+
+	case "NS":
+		// Number Set
+		switch v := value.(type) {
+		case []any:
+			ns := make([]string, len(v))
+			for i, item := range v {
+				ns[i] = fmt.Sprintf("%v", item)
+			}
+			return map[string]any{"__NS": ns}, nil
+		case string:
+			// Try to parse as JSON array
+			var list []any
+			if err := json.Unmarshal([]byte(v), &list); err != nil {
+				// Treat as single-element set
+				return map[string]any{"__NS": []string{v}}, nil
+			}
+			ns := make([]string, len(list))
+			for i, item := range list {
+				ns[i] = fmt.Sprintf("%v", item)
+			}
+			return map[string]any{"__NS": ns}, nil
+		default:
+			return map[string]any{"__NS": []string{fmt.Sprintf("%v", v)}}, nil
+		}
+
+	case "B":
+		// Binary type
+		switch v := value.(type) {
+		case []byte:
+			return v, nil
+		case string:
+			// Assume base64 encoded
+			return []byte(v), nil
+		default:
+			return []byte(fmt.Sprintf("%v", v)), nil
+		}
+
+	case "BS":
+		// Binary Set
+		switch v := value.(type) {
+		case []any:
+			bs := make([][]byte, len(v))
+			for i, item := range v {
+				if b, ok := item.([]byte); ok {
+					bs[i] = b
+				} else {
+					bs[i] = []byte(fmt.Sprintf("%v", item))
+				}
+			}
+			return map[string]any{"__BS": bs}, nil
+		case string:
+			// Try to parse as JSON array
+			var list []any
+			if err := json.Unmarshal([]byte(v), &list); err != nil {
+				// Treat as single-element set
+				return map[string]any{"__BS": [][]byte{[]byte(v)}}, nil
+			}
+			bs := make([][]byte, len(list))
+			for i, item := range list {
+				if b, ok := item.([]byte); ok {
+					bs[i] = b
+				} else {
+					bs[i] = []byte(fmt.Sprintf("%v", item))
+				}
+			}
+			return map[string]any{"__BS": bs}, nil
+		default:
+			return map[string]any{"__BS": [][]byte{[]byte(fmt.Sprintf("%v", v))}}, nil
+		}
+
+	default:
+		return nil, fmt.Errorf("unknown type hint: %s", typeHint)
+	}
 }
 
 func attributeValueToInterface(item map[string]types.AttributeValue) map[string]any {
@@ -309,6 +511,8 @@ func valueToAttr(v any) types.AttributeValue {
 		return &types.AttributeValueMemberBOOL{Value: val}
 	case nil:
 		return &types.AttributeValueMemberNULL{Value: true}
+	case []byte:
+		return &types.AttributeValueMemberB{Value: val}
 	case []any:
 		list := make([]types.AttributeValue, len(val))
 		for i, item := range val {
@@ -316,6 +520,23 @@ func valueToAttr(v any) types.AttributeValue {
 		}
 		return &types.AttributeValueMemberL{Value: list}
 	case map[string]any:
+		// Check for special set type markers
+		if ss, ok := val["__SS"]; ok {
+			if ssSlice, ok := ss.([]string); ok {
+				return &types.AttributeValueMemberSS{Value: ssSlice}
+			}
+		}
+		if ns, ok := val["__NS"]; ok {
+			if nsSlice, ok := ns.([]string); ok {
+				return &types.AttributeValueMemberNS{Value: nsSlice}
+			}
+		}
+		if bs, ok := val["__BS"]; ok {
+			if bsSlice, ok := bs.([][]byte); ok {
+				return &types.AttributeValueMemberBS{Value: bsSlice}
+			}
+		}
+		// Regular map
 		return &types.AttributeValueMemberM{Value: interfaceToAttributeValue(val)}
 	default:
 		return &types.AttributeValueMemberS{Value: fmt.Sprintf("%v", val)}
@@ -396,5 +617,60 @@ func AttributeValueToString(av types.AttributeValue) string {
 			return fmt.Sprintf("%v", val)
 		}
 		return string(jsonBytes)
+	}
+}
+
+// ItemToDataTypes converts a DynamoDB item to a pretty-printed JSON-like structure showing data types
+func ItemToDataTypes(item map[string]types.AttributeValue) string {
+	typeMap := attributeValueToTypeMap(item)
+	data, err := json.MarshalIndent(typeMap, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("error: %v", err)
+	}
+	return string(data)
+}
+
+func attributeValueToTypeMap(item map[string]types.AttributeValue) map[string]any {
+	result := make(map[string]any)
+	for k, v := range item {
+		result[k] = attrToType(v)
+	}
+	return result
+}
+
+func attrToType(av types.AttributeValue) any {
+	switch v := av.(type) {
+	case *types.AttributeValueMemberS:
+		return "S"
+	case *types.AttributeValueMemberN:
+		return "N"
+	case *types.AttributeValueMemberBOOL:
+		return "BOOL"
+	case *types.AttributeValueMemberNULL:
+		return "NULL"
+	case *types.AttributeValueMemberL:
+		list := make([]any, len(v.Value))
+		for i, item := range v.Value {
+			list[i] = attrToType(item)
+		}
+		return map[string]any{
+			"type":     "L",
+			"elements": list,
+		}
+	case *types.AttributeValueMemberM:
+		return map[string]any{
+			"type":       "M",
+			"attributes": attributeValueToTypeMap(v.Value),
+		}
+	case *types.AttributeValueMemberSS:
+		return "SS"
+	case *types.AttributeValueMemberNS:
+		return "NS"
+	case *types.AttributeValueMemberB:
+		return "B"
+	case *types.AttributeValueMemberBS:
+		return "BS"
+	default:
+		return "Unknown"
 	}
 }
