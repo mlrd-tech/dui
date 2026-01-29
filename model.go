@@ -559,7 +559,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 
 	// Handle special commands
 	switch cmd {
-	case ":q", ":quit", "/q", "\\q":
+	case ":q", ":quit", "/quit", "/q", "\\q":
 		return tea.Quit
 	case ":?", ":help", "/?", "/help":
 		m.mode = ModeHelp
