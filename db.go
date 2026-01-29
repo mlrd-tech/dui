@@ -240,7 +240,8 @@ func ItemToPrettyJSON(item map[string]types.AttributeValue) string {
 }
 
 // JSONToItem converts a JSON string to DynamoDB item
-func JSONToItem(jsonStr string) (map[string]types.AttributeValue, error) {
+// If originalItem is provided, it will preserve the original types for attributes without type hints
+func JSONToItem(jsonStr string, originalItem map[string]types.AttributeValue) (map[string]types.AttributeValue, error) {
 	var data map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
@@ -250,7 +251,7 @@ func JSONToItem(jsonStr string) (map[string]types.AttributeValue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return interfaceToAttributeValue(processedData), nil
+	return interfaceToAttributeValueWithOriginal(processedData, originalItem), nil
 }
 
 // processTypeHints processes attribute names with type hints (e.g., "name<S>", "age<N>")
@@ -497,7 +498,23 @@ func interfaceToAttributeValue(data map[string]any) map[string]types.AttributeVa
 	return result
 }
 
+func interfaceToAttributeValueWithOriginal(data map[string]any, originalItem map[string]types.AttributeValue) map[string]types.AttributeValue {
+	result := make(map[string]types.AttributeValue)
+	for k, v := range data {
+		var originalAttr types.AttributeValue
+		if originalItem != nil {
+			originalAttr = originalItem[k]
+		}
+		result[k] = valueToAttrWithOriginal(v, originalAttr)
+	}
+	return result
+}
+
 func valueToAttr(v any) types.AttributeValue {
+	return valueToAttrWithOriginal(v, nil)
+}
+
+func valueToAttrWithOriginal(v any, originalAttr types.AttributeValue) types.AttributeValue {
 	switch val := v.(type) {
 	case string:
 		return &types.AttributeValueMemberS{Value: val}
@@ -514,9 +531,40 @@ func valueToAttr(v any) types.AttributeValue {
 	case []byte:
 		return &types.AttributeValueMemberB{Value: val}
 	case []any:
+		// Check if original was a String Set, Number Set, or Binary Set
+		if originalAttr != nil {
+			switch originalAttr.(type) {
+			case *types.AttributeValueMemberSS:
+				// Original was SS, convert array to SS
+				ss := make([]string, len(val))
+				for i, item := range val {
+					ss[i] = fmt.Sprintf("%v", item)
+				}
+				return &types.AttributeValueMemberSS{Value: ss}
+			case *types.AttributeValueMemberNS:
+				// Original was NS, convert array to NS
+				ns := make([]string, len(val))
+				for i, item := range val {
+					ns[i] = fmt.Sprintf("%v", item)
+				}
+				return &types.AttributeValueMemberNS{Value: ns}
+			case *types.AttributeValueMemberBS:
+				// Original was BS, convert array to BS
+				bs := make([][]byte, len(val))
+				for i, item := range val {
+					if b, ok := item.([]byte); ok {
+						bs[i] = b
+					} else {
+						bs[i] = []byte(fmt.Sprintf("%v", item))
+					}
+				}
+				return &types.AttributeValueMemberBS{Value: bs}
+			}
+		}
+		// Default to List
 		list := make([]types.AttributeValue, len(val))
 		for i, item := range val {
-			list[i] = valueToAttr(item)
+			list[i] = valueToAttrWithOriginal(item, nil)
 		}
 		return &types.AttributeValueMemberL{Value: list}
 	case map[string]any:
@@ -536,8 +584,14 @@ func valueToAttr(v any) types.AttributeValue {
 				return &types.AttributeValueMemberBS{Value: bsSlice}
 			}
 		}
-		// Regular map
-		return &types.AttributeValueMemberM{Value: interfaceToAttributeValue(val)}
+		// Regular map - preserve nested original types if available
+		var originalMap map[string]types.AttributeValue
+		if originalAttr != nil {
+			if origM, ok := originalAttr.(*types.AttributeValueMemberM); ok {
+				originalMap = origM.Value
+			}
+		}
+		return &types.AttributeValueMemberM{Value: interfaceToAttributeValueWithOriginal(val, originalMap)}
 	default:
 		return &types.AttributeValueMemberS{Value: fmt.Sprintf("%v", val)}
 	}

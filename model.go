@@ -52,6 +52,7 @@ type Model struct {
 	viewContent     string
 	editTmpFile     string
 	editOrigContent string
+	editOrigItem    map[string]types.AttributeValue
 	preserveStatus  bool
 	lastError       string
 
@@ -810,6 +811,8 @@ func (m *Model) deleteSelectedItems() tea.Cmd {
 }
 
 func (m *Model) putNewItem() tea.Cmd {
+	// Clear original item since this is a new item, not an edit
+	m.editOrigItem = nil
 	// New item template with just primary key attributes
 	var content string
 	if len(m.tables) > 0 {
@@ -831,6 +834,7 @@ func (m *Model) editCurrentItem() tea.Cmd {
 		m.status = "No item selected"
 		return nil
 	}
+	m.editOrigItem = item
 	content := ItemToPrettyJSON(item)
 	return m.openEditor(content)
 }
@@ -885,9 +889,10 @@ func (m *Model) saveEditedItem(content string) tea.Cmd {
 	}
 
 	table := m.tables[m.currentTable]
+	originalItem := m.editOrigItem
 
 	return func() tea.Msg {
-		item, err := JSONToItem(content)
+		item, err := JSONToItem(content, originalItem)
 		if err != nil {
 			return operationDoneMsg{err: err}
 		}
