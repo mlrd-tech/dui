@@ -356,6 +356,7 @@ Keyboard Shortcuts:
   dd          Delete selected/current item(s)
   i, a        Insert new item (PutItem)
   f           Filter items (CSV: attr=value, attr2=value2)
+  s           Scan/refresh current table
   t           Select table
   x           (In item view) Toggle data type display
   ?           Show this help

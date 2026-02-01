@@ -409,6 +409,13 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.keyBuffer = ""
 		return m, nil
 
+	case "s":
+		m.keyBuffer = ""
+		if len(m.tables) > 0 {
+			return m, m.loadItems(m.tables[m.currentTable].Name, "")
+		}
+		return m, nil
+
 	case "esc":
 		m.keyBuffer = ""
 		m.input.SetValue("")
