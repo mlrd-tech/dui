@@ -319,19 +319,19 @@ func convertValueWithTypeHint(value any, typeHint string) (any, error) {
 		return nil, nil
 
 	case "L":
-		// List type
+		// List type - use special marker to prevent conversion back to sets
 		switch v := value.(type) {
 		case []any:
-			return v, nil
+			return map[string]any{"__L": v}, nil
 		case string:
 			// Try to parse as JSON array
 			var list []any
 			if err := json.Unmarshal([]byte(v), &list); err != nil {
 				return nil, fmt.Errorf("cannot parse list: %w", err)
 			}
-			return list, nil
+			return map[string]any{"__L": list}, nil
 		default:
-			return []any{v}, nil
+			return map[string]any{"__L": []any{v}}, nil
 		}
 
 	case "M":
@@ -568,7 +568,16 @@ func valueToAttrWithOriginal(v any, originalAttr types.AttributeValue) types.Att
 		}
 		return &types.AttributeValueMemberL{Value: list}
 	case map[string]any:
-		// Check for special set type markers
+		// Check for special type markers
+		if l, ok := val["__L"]; ok {
+			if lSlice, ok := l.([]any); ok {
+				list := make([]types.AttributeValue, len(lSlice))
+				for i, item := range lSlice {
+					list[i] = valueToAttrWithOriginal(item, nil)
+				}
+				return &types.AttributeValueMemberL{Value: list}
+			}
+		}
 		if ss, ok := val["__SS"]; ok {
 			if ssSlice, ok := ss.([]string); ok {
 				return &types.AttributeValueMemberSS{Value: ssSlice}
